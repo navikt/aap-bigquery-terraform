@@ -114,6 +114,39 @@ Sjekk provider-låsefilen `dev/.terraform.lock.hcl` inn i Git.
 Oppgrader providere i egne endringer, og se gjennom låsefilen og nye planer.
 Ikke bruk `init -upgrade` i vanlige CI-kjøringer.
 
+### Legge til eller oppgradere providere
+
+Logg inn med `nais login` før du følger stegene under.
+De avsluttes med `plan` mot GCP, som i
+[den vanlige lokale arbeidsflyten](#planlegge-og-utføre-endringer).
+
+Ved oppgradering, oppdater providerens versjonskrav i `main.tf`.
+Kjør deretter fra miljømappen:
+
+```sh
+terraform init -upgrade
+terraform providers lock \
+  -platform=darwin_arm64 \
+  -platform=linux_amd64
+terraform validate
+terraform plan
+```
+
+Ved tillegg av en ny provider bruker du `terraform init` uten `-upgrade`,
+og følger deretter de samme stegene for kontrollsummer og validering.
+
+`init` oppdaterer låsefilen for valgte provider-versjoner og plattformen du
+kjører på. Den sikrer ikke at alle plattformer fra en tidligere provider-versjon
+får nye kontrollsummer. `providers lock` registrerer kontrollsummer for både
+Mac med Apple Silicon og Linux-runneren i CI. Kjør den ved tillegg og oppgradering
+av providere, og legg til flere `-platform`-valg hvis teamet bruker andre plattformer.
+
+Se gjennom versjons- og kontrollsumendringene i `.terraform.lock.hcl` og
+ressursendringene i planen før du sjekker inn. CI bruker fortsatt `-lockfile=readonly`.
+Se [HashiCorps dokumentasjon om plattformvalg](https://developer.hashicorp.com/terraform/cli/commands/providers/lock#specifying-target-platforms).
+
+### Lagring av state
+
 State lagres i GCS-bucketen angitt i `dev/backend.tf`.
 Bucketen forvaltes av `google_storage_bucket.terraform_state` i `dev/main.tf`.
 Versjonering er aktivert, uniform bucket-level access er på og offentlig tilgang
@@ -148,6 +181,9 @@ For et eksisterende miljø bruker du [den vanlige lokale arbeidsflyten](#planleg
    ```sh
    terraform fmt
    terraform init
+   terraform providers lock \
+     -platform=darwin_arm64 \
+     -platform=linux_amd64
    terraform validate
    terraform plan
    terraform apply
