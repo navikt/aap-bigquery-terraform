@@ -18,7 +18,7 @@ Hver miljømappe er et selvstendig Terraform-oppsett.
 
 | Mappe | GCP-prosjekt | Region | State-bucket |
 |-------|-------------|--------|--------------|
-| `dev/` | TODO | TODO | TODO |
+| `dev/` | `aap-dev-e48b` | `europe-north1` | `aap-terraform-state-dev` |
 
 ## Databaseforutsetninger
 
@@ -47,7 +47,7 @@ Disse kontrollene krever ikke GCP-innlogging. Kjør fra repo-roten:
 terraform version
 cd dev
 terraform fmt -check -recursive
-terraform init -backend=false
+terraform init -backend=false -lockfile=readonly
 terraform validate
 ```
 
@@ -60,16 +60,44 @@ tilkoblinger i GCP. `init -backend=false` er for validering, ikke for
 
 ### Planlegge og utføre endringer
 
-TODO: Dokumenter innlogging, `init`, `plan` og `apply` mot GCP.
+Logg inn:
+
+```sh
+nais login
+```
+
+Kjør fra `dev/`:
+
+```sh
+terraform init -lockfile=readonly
+terraform validate
+terraform plan
+```
+
+`init` kobler opp GCS-backenden. Prosjektet for ressursene er angitt i
+provider-konfigurasjonen i `main.tf`, uavhengig av standardprosjektet i `gcloud`.
 
 Se gjennom hele planen før `apply`. Avklar uventede slettinger og erstatninger
 før du godkjenner.
 
+For avtalt lokal kjøring:
+
+```sh
+terraform apply
+```
+
+Kommandoen lager en ny plan og ber om godkjenning. Den utfører ikke automatisk
+planen fra forrige `terraform plan`.
+
 ## GitHub Actions
 
-[Workflowen](.github/workflows/terraform.yml) kjører `fmt`, `init -backend=false`
-og `validate` på pull requests og push til `main`. Den kan også startes manuelt
-fra Actions-fanen. Den har bare lesetilgang til repoet og ingen GCP-autentisering.
+[Workflowen](.github/workflows/terraform.yml) kjører `fmt`, `init -backend=false -lockfile=readonly` og `validate` på
+pull requests og push til `main`. Den kan også startes manuelt fra Actions-fanen. Den har bare lesetilgang til repoet
+og ingen GCP-autentisering.
+
+`-backend=false` lar CI validere uten tilgang til state-bucketen.
+`-lockfile=readonly` bruker provider-versjonene og kontrollsummene i den
+innsjekkede låsefilen uten å endre den. Kontrollene kjører ikke `plan` eller `apply`.
 
 TODO: Konfigurer GCP-autentisering med Workload Identity Federation.
 
@@ -86,16 +114,81 @@ Sjekk provider-låsefilen `dev/.terraform.lock.hcl` inn i Git.
 Oppgrader providere i egne endringer, og se gjennom låsefilen og nye planer.
 Ikke bruk `init -upgrade` i vanlige CI-kjøringer.
 
-TODO: Legg til providere, låsefil og `-lockfile=readonly` i CI.
-
-TODO: Konfigurer GCS-backend.
+State lagres i GCS-bucketen angitt i `dev/backend.tf`.
+Bucketen forvaltes av `google_storage_bucket.terraform_state` i `dev/main.tf`.
+Versjonering er aktivert, uniform bucket-level access er på og offentlig tilgang
+er blokkert. `force_destroy = false` hindrer Terraform i å slette bucketen
+mens den inneholder objekter.
 
 State og lagrede planer kan inneholde databasepassord og andre sensitive verdier,
 selv om Terraform skjuler dem i terminalutskriften. Begrens tilgangen.
 Ikke legg state, planfiler eller credentials i Git.
 
+## Førstegangsoppsett av state
+
+State-bucketen må finnes før Terraform kan bruke GCS-backend.
+Følgende engangsprosedyre ble brukt for dev 20. november 2026,
+med utgangspunkt i [Googles veiledning](https://docs.cloud.google.com/docs/terraform/resource-management/store-state).
+Bucketen ble opprettet med Terraform, ikke manuelt i GCP.
+
+For et nytt miljø, for eksempel prod, bruk en egen mappe (`prod/`),
+provider-konfigurasjon for riktig GCP-prosjekt og et eget, globalt unikt bucket-navn.
+Følg stegene under i den nye mappen, med egen state for miljøet.
+
+For et eksisterende miljø bruker du [den vanlige lokale arbeidsflyten](#planlegge-og-utføre-endringer).
+
+1. Opprett `main.tf` i den nye miljømappen med Terraform-versjon, Google-provider
+   og bare state-bucketen. Bruk `dev/main.tf` som eksempel, men tilpass prosjekt,
+   bucket-navn og lokasjon til det nye miljøet. Vent med `backend.tf` og øvrige ressurser.
+2. Logg inn med `nais login`. Bruk eksisterende rettigheter først.
+   Ved tilgangsfeil, stopp og avklar den manglende tillatelsen før du fortsetter.
+3. Gå til miljømappen fra repo-roten, for eksempel `cd prod`.
+   Kjør deretter én kommando om gangen:
+
+   ```sh
+   terraform fmt
+   terraform init
+   terraform validate
+   terraform plan
+   terraform apply
+   ```
+
+   Planen skal bare opprette bucket-ressursen. Kontroller prosjekt i
+   provider-konfigurasjonen og navn, lokasjon, versjonering og tilgangsinnstillinger
+   i planen før godkjenning. State lagres lokalt i dette steget.
+4. Legg til `backend.tf` i samme miljømappe. For dev er innholdet:
+
+   ```hcl
+   terraform {
+     backend "gcs" {
+       bucket = "aap-terraform-state-dev"
+     }
+   }
+   ```
+
+   Bruk riktig bucket-navn ved oppsett av et annet miljø.
+5. Migrer lokal state til bucketen:
+
+   ```sh
+   terraform init -migrate-state
+   ```
+
+   Godkjenn kopiering av eksisterende state når Terraform spør.
+6. Kontroller at bucket-ressursen finnes i state, og at planen viser ingen endringer:
+
+   ```sh
+   terraform state list
+   terraform plan
+   ```
+
+7. Når migreringen er bekreftet og planen viser ingen endringer, slett
+   `terraform.tfstate` og `terraform.tfstate.backup` i miljømappen hvis de finnes.
+
+Behold `.terraform/`, som inneholder lokal backend-konfigurasjon og nedlastede providere.
+Sjekk inn konfigurasjonen og `.terraform.lock.hcl`, men ikke state-filene.
+
 ## Manuelt eller eksternt oppsett
 
 TODO: Dokumenter databaseoppsettet.
 
-TODO: Dokumenter manuelt oppsett av state og GCP-tilgang.
+TODO: Dokumenter GCP-tilgang for GitHub Actions.
