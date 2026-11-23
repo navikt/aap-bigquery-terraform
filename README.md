@@ -92,16 +92,21 @@ planen fra forrige `terraform plan`.
 ## GitHub Actions
 
 [Workflowen](.github/workflows/terraform.yml) kjører `fmt`, `init -backend=false -lockfile=readonly` og `validate` på
-pull requests og push til `main`. Den kan også startes manuelt fra Actions-fanen. Den har bare lesetilgang til repoet
-og ingen GCP-autentisering.
+pull requests og push til `main`. Den kan også startes manuelt fra Actions-fanen.
+Valideringsjobben har bare lesetilgang til repoet og ingen GCP-autentisering.
 
 `-backend=false` lar CI validere uten tilgang til state-bucketen.
 `-lockfile=readonly` bruker provider-versjonene og kontrollsummene i den
-innsjekkede låsefilen uten å endre den. Kontrollene kjører ikke `plan` eller `apply`.
+innsjekkede låsefilen uten å endre den.
 
-TODO: Konfigurer GCP-autentisering med Workload Identity Federation.
+Jobben `Plan dev` kjører etter validering ved push til `main` og manuell kjøring
+fra `main`. Den autentiserer mot GCP med Workload Identity Federation (WIF).
+Bare denne jobben har `id-token: write`.
+Den kobler til GCS-backenden og kjører `terraform plan`, men ikke `apply`.
 
-TODO: Legg til `plan` mot dev.
+### Konfigurasjon
+
+TODO: Dokumenter WIF-oppsettet og IAM-bindingene når de er etablert. GCP-prosjektet og WIF-providerens fulle ressursnavn er angitt direkte i workflowen.
 
 TODO: Konfigurer godkjenning og `apply` av lagret plan.
 
