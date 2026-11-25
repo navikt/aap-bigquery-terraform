@@ -89,6 +89,18 @@ terraform apply
 Kommandoen lager en ny plan og ber om godkjenning. Den utfører ikke automatisk
 planen fra forrige `terraform plan`.
 
+### Legge til nye ressurser
+
+Vurder om workflowen trenger flere IAM-rettigheter når du legger til eller
+endrer ressurser. Avgrens tilgangen til enkeltressurser der det er mulig.
+Oppdater tildelingene i steg 5 og kontrollkommandoene i steg 6 under
+[førstegangsoppsett av WIF](#førstegangsoppsett-av-wif-for-github-actions)
+i samme endring.
+
+Tildel eventuelle nye rettigheter i GCP før workflowen skal bruke dem.
+Kontroller tilgangen med plan og kontrollert apply fra workflowen;
+en lokal kjøring bruker dine egne rettigheter.
+
 ## GitHub Actions
 
 [Workflowen](.github/workflows/terraform.yml) kjører `fmt`, `init -backend=false -lockfile=readonly` og `validate` på
@@ -106,7 +118,9 @@ Den kobler til GCS-backenden og kjører `terraform plan`, men ikke `apply`.
 
 ### Konfigurasjon
 
-TODO: Dokumenter WIF-oppsettet og IAM-bindingene når de er etablert. GCP-prosjektet og WIF-providerens fulle ressursnavn er angitt direkte i workflowen.
+GCP-prosjektet og WIF-providerens fulle ressursnavn er angitt direkte i workflowen.
+Se [førstegangsoppsett av WIF](#førstegangsoppsett-av-wif-for-github-actions)
+for opprettelse av provider og IAM-binding.
 
 TODO: Konfigurer godkjenning og `apply` av lagret plan.
 
@@ -228,8 +242,222 @@ For et eksisterende miljø bruker du [den vanlige lokale arbeidsflyten](#planleg
 Behold `.terraform/`, som inneholder lokal backend-konfigurasjon og nedlastede providere.
 Sjekk inn konfigurasjonen og `.terraform.lock.hcl`, men ikke state-filene.
 
+## Førstegangsoppsett av WIF for GitHub Actions
+
+Oppskriften gir GitHub Actions tilgang til å lese og skrive Terraform-state og
+administrere bucketen der state lagres.
+Den bygger på
+[Googles veiledning for konfigurasjon av Workload Identity Federation med GitHub Actions](https://docs.cloud.google.com/iam/docs/workload-identity-federation-with-deployment-pipelines).
+
+Eksempelet bruker dev. For prod eller andre miljøer, sett `PROJECT_ID`,
+`PROJECT_NUMBER` og `BUCKET` til miljøets verdier i steg 1.
+State-bucketen må finnes fra før. Miljøet trenger også en egen jobb i
+[workflowen](.github/workflows/terraform.yml) med riktig GCP-prosjekt,
+WIF-provider og Terraform-mappe.
+WIF-provideren i steg 3 konfigureres til å godta bare GitHub-kjøringer fra
+`main`, utløst av push eller manuell start.
+
+Du trenger `gcloud` og innlogget GitHub CLI (`gh`). Brukeren som utfører oppsettet
+trenger rettigheter til å administrere WIF og endre bucketens IAM.
+Ved tilgangsfeil, avklar den manglende tillatelsen med prosjektadministrator.
+
+Hvis et API er deaktivert, aktiver det med kommandoen under og prøv steget igjen.
+Bruk API-navnet fra feilmeldingen.
+
+```sh
+gcloud services enable API_NAVN --project="${PROJECT_ID}"
+```
+
+Kjør ett steg om gangen i samme terminal. Kommandoene kan kjøres fra repo-roten.
+Ved gjentatt kjøring oppretter du bare ressurser som mangler, og kontrollerer
+eksisterende konfigurasjon før du går videre. En mislykket kontroll betyr ikke
+at ressursen mangler. IAM-kommandoene i steg 4 og 5 kan gjentas uten å lage
+duplikate bindinger; de fjerner heller ikke eksisterende tilganger.
+
+1. Logg inn og sett verdiene for dev. GitHub-ID-ene hentes fra repoets metadata:
+
+   ```sh
+   nais login
+   PROJECT_ID="aap-dev-e48b"
+   PROJECT_NUMBER="617704890496"
+   REPOSITORY="navikt/aap-bigquery-terraform"
+   BUCKET="aap-terraform-state-dev"
+   POOL_ID="github-actions"
+   PROVIDER_ID="github-oidc"
+   REPOSITORY_ID="$(gh api "repos/${REPOSITORY}" --jq '.id')"
+   REPOSITORY_OWNER_ID="$(gh api "repos/${REPOSITORY}" --jq '.owner.id')"
+   ```
+
+   Kontroller aktiv `gcloud`-konto, prosjektnummer og GitHub-ID-er:
+
+   ```sh
+   gcloud auth list --filter="status:ACTIVE" --format="value(account)"
+   gcloud projects describe "${PROJECT_ID}" --format="value(projectNumber)"
+   printf 'Repository ID: %s\nOwner ID: %s\n' "${REPOSITORY_ID}" "${REPOSITORY_OWNER_ID}"
+   ```
+
+   Prosjektnummeret skal stemme med `PROJECT_NUMBER`, og begge GitHub-ID-ene skal være
+   numeriske og ikke tomme. Vi bruker numeriske ID-er i tilgangsreglene fordi
+   de ikke kan gjenbrukes dersom et repo- eller organisasjonsnavn blir ledig.
+
+2. Kontroller om poolen allerede finnes:
+
+   ```sh
+   gcloud iam workload-identity-pools list \
+     --project="${PROJECT_ID}" \
+     --location=global
+   ```
+
+   Hvis poolen med ID `github-actions` ikke finnes, opprett den:
+
+   ```sh
+   gcloud iam workload-identity-pools create "${POOL_ID}" \
+     --project="${PROJECT_ID}" \
+     --location=global \
+     --display-name="GitHub Actions"
+   ```
+
+   Hvis poolen finnes, kontroller den:
+
+   ```sh
+   gcloud iam workload-identity-pools describe "${POOL_ID}" \
+     --project="${PROJECT_ID}" \
+     --location=global
+   ```
+
+   Gå videre hvis poolen er aktiv og er den tiltenkte poolen for oppsettet.
+   Ved ukjent eksisterende bruk, avklar før du fortsetter.
+
+3. Kontroller om OIDC-provideren allerede finnes:
+
+   ```sh
+   gcloud iam workload-identity-pools providers list \
+     --project="${PROJECT_ID}" \
+     --location=global \
+     --workload-identity-pool="${POOL_ID}"
+   ```
+
+   Hvis provideren med ID `github-oidc` mangler, opprett den med attribute
+   mapping og condition:
+
+   ```sh
+   gcloud iam workload-identity-pools providers create-oidc "${PROVIDER_ID}" \
+     --project="${PROJECT_ID}" \
+     --location=global \
+     --workload-identity-pool="${POOL_ID}" \
+     --display-name="GitHub OIDC" \
+     --issuer-uri="https://token.actions.githubusercontent.com" \
+     --attribute-mapping="google.subject=assertion.sub,attribute.repository_id=assertion.repository_id" \
+     --attribute-condition="assertion.repository_owner_id == '${REPOSITORY_OWNER_ID}' && assertion.repository_id == '${REPOSITORY_ID}' && assertion.ref == 'refs/heads/main' && assertion.event_name in ['push', 'workflow_dispatch']"
+   ```
+
+   [`google.subject` er obligatorisk i WIF](https://docs.cloud.google.com/iam/docs/workload-identity-federation#mapping)
+   og brukes av GCP til å identifisere innlogget identitet, blant annet i logger.
+   Bucket-tilgangen i steg 4 styres av `attribute.repository_id`, ikke subject.
+   Condition leser øvrige felt direkte fra tokenet
+   via `assertion`, uten ekstra mapping.
+   Condition begrenser godkjente tokens til dette repoet i organisasjonen,
+   fra `main`, ved push eller manuell kjøring.
+   
+   Hvis provideren finnes, les konfigurasjonen:
+   
+   ```sh
+   gcloud iam workload-identity-pools providers describe "${PROVIDER_ID}" \
+     --project="${PROJECT_ID}" \
+     --location=global \
+     --workload-identity-pool="${POOL_ID}" \
+     --format="yaml(name,state,oidc,attributeMapping,attributeCondition)"
+   ```
+
+   Hopp over opprettelsen hvis provideren er aktiv og issuer, mapping og condition
+   stemmer med kommandoen over. Avklar eventuelle avvik før du endrer en
+   eksisterende provider.
+
+
+4. Gi GitHub-identiteten tilgang bare til miljøets state-bucket:
+
+   ```sh
+   PRINCIPAL="principalSet://iam.googleapis.com/projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/${POOL_ID}/attribute.repository_id/${REPOSITORY_ID}"
+
+   gcloud storage buckets add-iam-policy-binding "gs://${BUCKET}" \
+     --member="${PRINCIPAL}" \
+     --role="roles/storage.admin" \
+     --condition=None
+   ```
+
+   `roles/storage.admin` gir full kontroll over denne bucketen og objektene i den,
+   inkludert state og låseobjektet. Rollen dekker også forvaltning av selve
+   bucket-ressursen i Terraform. Den gir ikke tilgang til andre buckets.
+   For bare backend-bruk ville `roles/storage.objectAdmin` vært tilstrekkelig.
+   `--condition=None` legger ingen ekstra betingelser på bucket-tilgangen.
+   Kravene til repo, `main` og hendelsestype fra steg 3 gjelder fortsatt.
+
+5. Gi workflowen tilgang til øvrige Terraform-ressurser.
+
+   TODO: Fyll inn nødvendige prosjektroller for Datastream, nettverk og BigQuery
+   i `ROLES`. Listen er foreløpig tom, så løkken gjør ingen endringer.
+
+   ```sh
+   ROLES=()
+
+   for ROLE in "${ROLES[@]}"; do
+     gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
+       --member="${PRINCIPAL}" \
+       --role="${ROLE}" \
+       --condition=None || break
+   done
+   ```
+
+   Ved nye roller, legg dem til i `ROLES` og kjør løkken på nytt.
+   Eksisterende bindinger beholdes uten duplikater. Å fjerne en rolle fra listen
+   trekker ikke tilbake tilgangen i GCP.
+
+   Disse rollene gjelder hele prosjektet. Tilgang som skal avgrenses til
+   enkeltressurser, gis på den aktuelle ressursen, som for bucketen i steg 4.
+
+6. Kontroller provider og IAM-bindinger:
+
+   ```sh
+   gcloud iam workload-identity-pools providers describe "${PROVIDER_ID}" \
+     --project="${PROJECT_ID}" \
+     --location=global \
+     --workload-identity-pool="${POOL_ID}" \
+     --format="yaml(name,state,oidc,attributeMapping,attributeCondition)"
+
+   gcloud storage buckets get-iam-policy "gs://${BUCKET}"
+
+   gcloud projects get-iam-policy "${PROJECT_ID}" \
+     --flatten="bindings[].members" \
+     --filter="bindings.members='${PRINCIPAL}'" \
+     --format="yaml(bindings.role,bindings.condition)"
+   ```
+
+   Providerens `name` skal være lik `workload_identity_provider` i miljøets
+   workflow-jobb. For dev er verdien:
+
+   ```text
+   projects/617704890496/locations/global/workloadIdentityPools/github-actions/providers/github-oidc
+   ```
+
+   Kontroller at provideren er aktiv, at condition stemmer, og at bucket-policyen
+   inneholder riktig principal med `roles/storage.admin`.
+   Den siste kommandoen viser prosjektroller gitt direkte til GitHub-identiteten,
+   inkludert eventuelle betingelser. Tomt resultat er forventet før slike roller
+   er lagt til. Kommandoen viser ikke arvede roller eller bindinger på enkeltressurser.
+
+   Bucket-bindingen kontrolleres med `get-iam-policy` over. Hvis steg 5 utvides
+   med bindinger på andre enkeltressurser, legg samtidig til kommandoer her
+   som leser IAM-policyen på disse ressursene. Kontroller principal, rolle og
+   eventuelle betingelser mot tildelingen i steg 5.
+
+7. Verifiser tilgangen fra GitHub Actions. La WIF- og IAM-endringene få minst
+   fem minutter til å tre i kraft. Start workflowen fra
+   Actions > Terraform > Run workflow, med `main` valgt.
+   Kontroller at autentisering, `terraform init` og planjobben for miljøet
+   lykkes. Se gjennom planen og avklar uventede endringer.
+   En vellykket plan bekrefter ikke at workflowen kan opprette eller endre ressursene.
+   TODO: Verifiser skriverettighetene ved første kontrollerte `apply`.
+
 ## Manuelt eller eksternt oppsett
 
 TODO: Dokumenter databaseoppsettet.
-
-TODO: Dokumenter GCP-tilgang for GitHub Actions.
